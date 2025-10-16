@@ -1,0 +1,122 @@
+include:
+  - remote: "https://gitlab.com/cscs-ci/recipes/-/raw/master/templates/v2/.ci-ext.yml"
+  - local: "cscs-ci/ext-config.yml"
+
+# Note:
+#   block-name-with-dashes      -> defined in remote cscs-ci ext include
+#   block_name_with_underscores -> defined in this file or other file in this repo
+
+variables: # Default values for base variables (can be overriden in jobs definitions)
+  PROJECT_NAME: "llvm-project"
+  PROJECT_REPO: "https://github.com/llvm/llvm-project.git"
+  CUDA_VERSION: "12.6.2"
+  ROCM_VERSION: "6.2.4"
+  UBUNTU_VERSION: "24.04"
+  UV_VERSION: "0.9.3"
+
+stages:
+  - base
+  - build
+  - test
+
+# -- Base stage --
+# In the base stage, we create the base image for the project CI.
+# It is only run if one of the configuration files has changed.
+# The project repository is cloned and added to the base image
+# at the build stage.
+.base_common:
+  stage: base
+  extends:
+    - .dynamic-image-name # Creates a tag (exported as DOCKER_TAG) depending on the files in WATCH_FILECHANGES
+  variables:
+    # jfrog.svc.cscs.ch/dockerhub/ubuntu is the cached version of docker.io/ubuntu
+    BASE_IMAGE: jfrog.svc.cscs.ch/dockerhub/ubuntu:${UBUNTU_VERSION}
+    # CSCS_REBUILD_POLICY: 'always' => rebuild even if target tag exists already
+    CSCS_REBUILD_POLICY: if-not-exists # default, i.e. we could also skip the variable
+    DOCKERFILE: cscs-ci/Dockerfile
+    # We pass the build arguments to the Dockerfile as a JSON array of names.
+    # The actual values will be taken from environment variables with the same
+    # names, if they exist, or otherwise the defaults in the Dockerfile will be used.
+    # To override the defaults, just define these variables in the actual job.
+    DOCKER_BUILD_ARGS: '["BASE_IMAGE", "EXTRA_APTGET", "PY_VERSION", "UV_VERSION", "WORKDIR_PATH" ]'
+    # $DOCKER_TAG is appended in the before_script of .dynamic-image-name (${PERSIST_IMAGE_NAME}:$DOCKER_TAG)
+    PERSIST_IMAGE_NAME: ${CSCS_REGISTRY_PATH}/public/${ARCH}/base/ext-open-ci-${PROJECT_NAME}-${PY_VERSION}
+    WATCH_FILECHANGES: "${PROJECT_NAME}/Dockerfile ${PROJECT_NAME}/ci.yml cscs-ci/cscs-ci-ext-config.yml"
+
+.base_extra_cuda:
+  variables:
+    # jfrog.svc.cscs.ch/dockerhub/nvidia is the cached version of docker.io/nvidia
+    BASE_IMAGE: jfrog.svc.cscs.ch/dockerhub/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}
+
+.base_extra_rocm:
+  variables:
+    # jfrog.svc.cscs.ch/dockerhub/rocm is the cached version of docker.io/rocm
+    BASE_IMAGE: jfrog.svc.cscs.ch/dockerhub/rocm/dev-ubuntu-${UBUNTU_VERSION}:${ROCM_VERSION}-complete
+    #UBUNTU_VERSION: '22.04'
+
+base_gh200:
+  extends:
+    - .container-builder-cscs-gh200
+    - .base_common
+    - .base_extra_cuda
+  needs: []
+
+base_amd_rocm:
+  extends:
+    - .container-builder-cscs-zen2
+    - .base_common
+    - .base_extra_rocm
+  needs: []
+
+# -- Build stage --
+# In the build stage we create the image with the project sources for the actual CI run.
+.build_common:
+  stage: build
+  variables:
+    # $DOCKER_TAG is appended in the before_script section below (${PERSIST_IMAGE_NAME}:$DOCKER_TAG)
+    PERSIST_IMAGE_NAME: ${CSCS_REGISTRY_PATH}/public/${ARCH}/build/ext-open-ci-${PROJECT_NAME}-${PY_VERSION}
+    DOCKERFILE: ${PROJECT_NAME}/Dockerfile
+    DOCKER_BUILD_ARGS: '["PYVERSION=$PYVERSION", "BASE_IMAGE=${BASE_IMAGE_${PYVERSION_PREFIX}}"]'
+  before_script:
+    - export DOCKER_TAG=$(git ls-remote ${PROJECT_REPO} HEAD | awk '{print $1}')
+    - export PERSIST_IMAGE_NAME=${PERSIST_IMAGE_NAME}:$DOCKER_TAG
+    - echo "DOCKER_TAG=${DOCKER_TAG}" > build.env
+  artifacts:
+    reports:
+      dotenv: build.env
+
+build_gh200:
+  extends: [.container-builder-cscs-gh200, .build_common]
+  needs: [base_gh200]
+
+build_amd_rocm:
+  extends: [.container-builder-cscs-zen2, .build_common]
+  needs: [base_amd_rocm]
+
+# -- Test stage --
+# In the test stage we just run selected project tests.
+.test_common:
+  stage: test
+  # DOCKER_TAG comes from the dotenv artifact exported in the build stage
+  image: ${CSCS_REGISTRY_PATH}/public/${ARCH}/build/ext-open-ci-${PROJECT_NAME}-${PY_VERSION}:${DOCKER_TAG}
+  script:
+    - echo "Starting test stage for project '${PROJECT_NAME}'"
+    - echo "Running check-mlir-examples-nvgpu tests"
+    - ninja check-mlir-examples-nvgpu
+    - echo "Running check-mlir-integration-gpu-cuda-sm90 examples"
+    - ninja check-mlir-integration-gpu-cuda-sm90
+    - echo "Test stage for project '${PROJECT_NAME}' has completed"
+
+test_cscs_gh200:
+  extends:
+    - .container-runner-santis-gh200
+    - .test_common
+  needs:
+    - build_gh200
+
+test_cscs_amd_rocm:
+  extends:
+    - .tds-container-runner-beverin-mi200
+    - .test_common
+  needs:
+    - build_cscs_amd_rocm
