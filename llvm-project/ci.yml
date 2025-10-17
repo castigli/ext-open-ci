@@ -11,6 +11,7 @@ variables: # Default values for base variables (can be overriden in jobs definit
   PROJECT_REPO: "https://github.com/llvm/llvm-project.git"
   CUDA_VERSION: "12.6.2"
   ROCM_VERSION: "6.2.4"
+  PY_VERSION: "3.12"
   UBUNTU_VERSION: "24.04"
   UV_VERSION: "0.9.3"
 
@@ -69,18 +70,19 @@ base_amd_rocm:
   needs: []
 
 # -- Build stage --
-# In the build stage we create the image with the project sources for the actual CI run.
+# In the build stage we create the image with the compiled project sources.
 .build_common:
   stage: build
   variables:
-    # $DOCKER_TAG is appended in the before_script section below (${PERSIST_IMAGE_NAME}:$DOCKER_TAG)
+    BASE_IMAGE: ${CSCS_REGISTRY_PATH}/public/${ARCH}/base/ext-open-ci-${PROJECT_NAME}-${PY_VERSION}:${DOCKER_TAG}
+    # $DOCKER_BUILD_TAG is appended in the before_script section below (${PERSIST_IMAGE_NAME}:$DOCKER_BUILD_TAG)
     PERSIST_IMAGE_NAME: ${CSCS_REGISTRY_PATH}/public/${ARCH}/build/ext-open-ci-${PROJECT_NAME}-${PY_VERSION}
     DOCKERFILE: ${PROJECT_NAME}/Dockerfile
-    DOCKER_BUILD_ARGS: '["PYVERSION=$PYVERSION", "BASE_IMAGE=${BASE_IMAGE_${PYVERSION_PREFIX}}"]'
+    DOCKER_BUILD_ARGS: '["BASE_IMAGE", "WORKDIR_PATH" ]'
   before_script:
-    - export DOCKER_TAG=$(git ls-remote ${PROJECT_REPO} HEAD | awk '{print $1}')
-    - export PERSIST_IMAGE_NAME=${PERSIST_IMAGE_NAME}:$DOCKER_TAG
-    - echo "DOCKER_TAG=${DOCKER_TAG}" > build.env
+    - export DOCKER_BUILD_TAG=$(git ls-remote ${PROJECT_REPO} HEAD | awk '{print $1}')
+    - export PERSIST_IMAGE_NAME=${PERSIST_IMAGE_NAME}:$DOCKER_BUILD_TAG
+    - echo "DOCKER_BUILD_TAG=${DOCKER_BUILD_TAG}" > build.env
   artifacts:
     reports:
       dotenv: build.env
@@ -97,8 +99,8 @@ build_amd_rocm:
 # In the test stage we just run selected project tests.
 .test_common:
   stage: test
-  # DOCKER_TAG comes from the dotenv artifact exported in the build stage
-  image: ${CSCS_REGISTRY_PATH}/public/${ARCH}/build/ext-open-ci-${PROJECT_NAME}-${PY_VERSION}:${DOCKER_TAG}
+  # DOCKER_BUILD_TAG comes from the dotenv artifact exported in the build stage
+  image: ${CSCS_REGISTRY_PATH}/public/${ARCH}/build/ext-open-ci-${PROJECT_NAME}-${PY_VERSION}:${DOCKER_BUILD_TAG}
   script:
     - echo "Starting test stage for project '${PROJECT_NAME}'"
     - echo "Running check-mlir-examples-nvgpu tests"
@@ -116,7 +118,7 @@ test_cscs_gh200:
 
 test_cscs_amd_rocm:
   extends:
-    - .tds-container-runner-beverin-mi200
+    - .tds-container-runner-beverin-mi200 # .tds-container-runner-beverin-mi300 ?
     - .test_common
   needs:
     - build_cscs_amd_rocm
